@@ -1,0 +1,40 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-03-19",
+  "apps": [
+    {
+      "name": "acorn",
+      "description": "Visual development environment for managing software projects",
+      "long_description": "Acorn Atelier is a Poppy service app that provides a visual development environment for managing software projects. It is the primary interface for registering git repositories, planning features collaboratively with Poppy, monitoring autonomous code execution, and browsing living project documentation. Acorn reimplements the KitTools workflow as Poppy-native operations — sharing the same file-based data contracts (kit_tools/ directory) so that developers can move seamlessly between the Acorn UI and CLI-based tools like Claude Code.",
+      "version": "0.1.0",
+      "author": "WashingBearLabs",
+      "repo_url": "https://github.com/WashingBearLabs/Acorn.git",
+      "image": null,
+      "icon": null,
+      "category": "development",
+      "port": 8000,
+      "manifest_url": "https://raw.githubusercontent.com/WashingBearLabs/Acorn/main/manifest.yaml",
+      "capabilities": [
+        "project-management",
+        "feature-planning",
+        "code-execution-monitoring",
+        "documentation-browsing",
+        "kit-tools-integration"
+      ],
+      "tags": [
+        "development",
+        "project-management",
+        "coding-agents",
+        "kit-tools",
+        "visual-ide"
+      ],
+      "use_cases": [
+        "Register and manage git repositories as Poppy projects",
+        "Plan features collaboratively with Poppy using KitTools specs",
+        "Monitor autonomous code execution from coding agents",
+        "Browse project documentation, specs, and architecture docs",
+        "Run KitTools workflows (plan-feature, execute-feature, validate) from a UI"
+      ]
+    }
+  ]
+}
