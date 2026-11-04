@@ -1,0 +1,76 @@
+name: validate-registry
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: validate-registry-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate-registry:
+    name: validate-registry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: python3 -c 'import sys; assert sys.version_info >= (3, 12), sys.version'
+      - name: Validator and base registry from the base branch
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git cat-file -e "$BASE_SHA^{commit}"
+            if git cat-file -e "$BASE_SHA:registry.json" 2>/dev/null; then
+              git show "$BASE_SHA:registry.json" > "$RUNNER_TEMP/base.json"
+            fi
+            BASE_CI="$(git ls-tree --name-only "$BASE_SHA" -- .github/scripts/validate_registry.py .github/workflows/validate-registry.yml)"
+            if [ -z "$BASE_CI" ]; then
+              cp .github/scripts/validate_registry.py "$RUNNER_TEMP/validate_registry.py"
+              echo "::warning title=validator from this PR::The base branch has no validator or workflow yet (first PR), so this PR's own copy ran."
+            else
+              git show "$BASE_SHA:.github/scripts/validate_registry.py" > "$RUNNER_TEMP/validate_registry.py"
+            fi
+            if [ -n "$(git diff --name-only "$BASE_SHA" HEAD -- .github/)" ]; then
+              echo "::warning title=.github changed::This PR changes files under .github/. Review them by hand; this check ran the base branch's validator."
+              echo '### This PR changes files under .github/ (review by hand)' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            cp .github/scripts/validate_registry.py "$RUNNER_TEMP/validate_registry.py"
+          fi
+      - name: Offline checks and change summary
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          rc=0
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I "$RUNNER_TEMP/validate_registry.py" --root . --changed-against "$RUNNER_TEMP/base.json" registry.json > "$RUNNER_TEMP/offline.txt" || rc=$?
+          else
+            python3 -I "$RUNNER_TEMP/validate_registry.py" --root . registry.json > "$RUNNER_TEMP/offline.txt" || rc=$?
+          fi
+          cat "$RUNNER_TEMP/offline.txt"
+          if grep -q '^CHANGED ' "$RUNNER_TEMP/offline.txt"; then
+            { echo '### Registry changes in this PR'; echo '```text'; grep '^CHANGED ' "$RUNNER_TEMP/offline.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if grep -q '^CHANGED .*\[install source\]$' "$RUNNER_TEMP/offline.txt"; then
+            echo "::warning title=install source changed::An existing entry's image, repo_url, ref, manifest_url or port changed. Review it by hand."
+          fi
+          exit "$rc"
+      - name: Online checks (theme entries changed by this PR)
+        if: github.event_name == 'pull_request'
+        env:
+          POPPYMARKET_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          rc=0
+          python3 -I "$RUNNER_TEMP/validate_registry.py" --root . --online --changed-against "$RUNNER_TEMP/base.json" registry.json || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::warning title=could not verify::Some online checks could not complete (see UNVERIFIED lines). Re-run this job before merging."
+            exit 0
+          fi
+          exit "$rc"
