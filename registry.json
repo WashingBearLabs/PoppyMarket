@@ -41,10 +41,10 @@
       "kind": "theme",
       "display_name": "Closeout Test",
       "description": "The stock Poppy look — dark glass, cyan accents, ambient circuit grid.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": "WashingBearLabs",
       "repo_url": "https://github.com/WashingBearLabs/poppy-theme-closeout-test",
-      "ref": "4334806989bd36089377e463b65a04def92f3ad4",
+      "ref": "1eb253dc8989f6b1811afa0c2b5000a61c9ec872",
       "preview_image": "themes/closeout-test/preview.png",
       "tags": [
         "theme"
