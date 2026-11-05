@@ -35,6 +35,16 @@
         "Browse project documentation, specs, and architecture docs",
         "Run KitTools workflows (plan-feature, execute-feature, validate) from a UI"
       ]
+    },
+    {
+      "name": "proofbad",
+      "kind": "theme",
+      "description": "Validator-swap proof (do not merge)",
+      "version": "0.1.0",
+      "author": "WashingBearLabs",
+      "repo_url": "https://github.com/WashingBearLabs/poppy-theme-proofbad",
+      "ref": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+      "preview_image": "themes/proofbad/preview.png"
     }
   ]
 }
