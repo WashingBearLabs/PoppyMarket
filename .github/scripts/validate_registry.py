@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import http.client
 import json
 import os
 import re
@@ -252,6 +253,13 @@ def _entry_kind(entry: dict[str, object]) -> str | None:
     return None
 
 
+def _entry_label(kind: str | None, name: object) -> str | None:
+    """``<kind>:<name>``, or None unless the name passes the pattern (no echo)."""
+    if kind is None or not isinstance(name, str):
+        return None
+    return f"{kind}:{name}" if APP_NAME_PATTERN.fullmatch(name) else None
+
+
 def validate_registry_asset_path(path: str, extensions: frozenset[str]) -> str:
     """Return ``path`` or raise ``ValueError`` (mirrors Poppy's asset-path rule).
 
@@ -319,10 +327,7 @@ def validate_entry(entry: object, *, org: str = THEME_REPO_OWNER) -> list[Findin
     findings: list[Finding] = []
 
     kind = _entry_kind(item)
-    name = item.get("name")
-    label: str | None = None
-    if kind is not None and isinstance(name, str) and APP_NAME_PATTERN.fullmatch(name):
-        label = f"{kind}:{name}"
+    label = _entry_label(kind, item.get("name"))
 
     def add(code: str, field: str, message: str) -> None:
         findings.append(Finding(code, None, label, field, message))
@@ -352,6 +357,7 @@ def validate_entry(entry: object, *, org: str = THEME_REPO_OWNER) -> list[Findin
 
     _check_shared_entry_rules(item, kind, add)
     _check_policy_rules(item, kind, org, add)
+    _check_surrogates(item, add)
     return findings
 
 
@@ -433,6 +439,21 @@ def _check_shared_entry_rules(
 
 def _has_refused(value: str) -> bool:
     return any(ord(ch) in REFUSED_CODEPOINTS for ch in value)
+
+
+def _has_surrogate(value: str) -> bool:
+    return any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)
+
+
+def _check_surrogates(
+    item: dict[str, object], add: Callable[[str, str, str], None]
+) -> None:
+    """Refuse lone surrogates, which Poppy's string fields do not accept."""
+    for field, value in item.items():
+        values = cast("list[object]", value) if isinstance(value, list) else [value]
+        if any(isinstance(v, str) and _has_surrogate(v) for v in values):
+            named = field if field in _KNOWN_FIELDS else UNKNOWN_FIELD
+            add(ENTRY_FIELD_INVALID, named, "Field contains a surrogate code point.")
 
 
 def _tag_version_problem(version: str) -> bool:
@@ -592,7 +613,7 @@ def _check_shape(doc: dict[str, object]) -> list[Finding]:
     return findings
 
 
-def _check_entries(apps: list[object]) -> list[Finding]:
+def _check_entries(apps: list[object], org: str) -> list[Finding]:
     findings: list[Finding] = []
     seen: set[tuple[str, str]] = set()
     app_names: set[str] = set()
@@ -602,7 +623,7 @@ def _check_entries(apps: list[object]) -> list[Finding]:
             if _entry_kind(entry) == "app" and isinstance(entry.get("name"), str):
                 app_names.add(str(entry["name"]))
     for index, item in enumerate(apps):
-        findings.extend(replace(f, index=index) for f in validate_entry(item))
+        findings.extend(replace(f, index=index) for f in validate_entry(item, org=org))
         if not isinstance(item, dict):
             continue
         entry = item  # pyright: ignore[reportUnknownVariableType]
@@ -610,7 +631,7 @@ def _check_entries(apps: list[object]) -> list[Finding]:
         name = entry.get("name")
         if kind is None or not isinstance(name, str):
             continue
-        label = f"{kind}:{name}" if APP_NAME_PATTERN.fullmatch(name) else None
+        label = _entry_label(kind, name)
         if (kind, name) in seen:
             findings.append(
                 Finding(
@@ -713,14 +734,7 @@ def _entry_file_results(
     entry: dict[str, object], index: int | None, root: Path
 ) -> tuple[list[Finding], dict[str, int]]:
     kind = _entry_kind(entry)
-    name = entry.get("name")
-    label = (
-        f"{kind}:{name}"
-        if kind is not None
-        and isinstance(name, str)
-        and APP_NAME_PATTERN.fullmatch(name)
-        else None
-    )
+    label = _entry_label(kind, entry.get("name"))
     findings: list[Finding] = []
     sizes: dict[str, int] = {}
     for field, rel in _asset_paths(entry):
@@ -767,7 +781,6 @@ def validate_document(
     root: Path | None = None,
 ) -> Report:
     """Validate registry document bytes; ``root`` enables the file checks."""
-    del org
     if len(data) > MAX_REGISTRY_DOCUMENT_BYTES:
         return Report(
             [
@@ -824,7 +837,7 @@ def validate_document(
                 )
             )
         else:
-            findings.extend(_check_entries(items))
+            findings.extend(_check_entries(items, org))
             if root is not None:
                 findings.extend(_check_files(items, root))
 
@@ -850,16 +863,17 @@ class ManifestScalarError(ValueError):
 # Characters PyYAML's reader refuses outright; refusing them here keeps the reader
 # from returning values for text PyYAML cannot load at all.
 _YAML_NON_PRINTABLE = re.compile(
-    "[^\x09\x0a\x0d\x20-\x7e\x85\xa0-퟿-�\U00010000-\U0010ffff]"
+    "[^\x09\x0a\x0d\x20-\x7e\x85\xa0-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]"
 )
-_REFUSED_TEXT_CHARS = ("﻿", "\x85", chr(0x2028), chr(0x2029))
-_REFUSED_KEY_STARTS = frozenset("\"'?:[{&*!|>%@`\t")
+_REFUSED_TEXT_CHARS = ("\ufeff", "\x85", chr(0x2028), chr(0x2029))
+_REFUSED_KEY_STARTS = frozenset("\"'?:[]{}&*!|>%@`,\t")
 # Node properties, aliases and reserved indicators: never written by dump_manifest.
 _REFUSED_VALUE_STARTS = frozenset("&!*%@`")
 # Indicators only when followed by whitespace or the end of the line.
 _SPACED_INDICATORS = frozenset("?:-")
 _YAML_SPACE = " \t"
 _IDENTITY_KEY_LINE = re.compile(r"(id|version)\s*:")
+_MERGE_KEY_LINE = re.compile(r"<<\s*:")
 _IDENTITY_LINE = re.compile(r"(id|version): (.*)")
 _PLAIN_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 _SINGLE_QUOTED_VALUE = re.compile(r"'(?:[^']|'')*'")
@@ -1013,6 +1027,8 @@ def _flow_end(line: str, start: int) -> int:
                 break
             i = end
             continue
+        if ch == "#":
+            raise ManifestScalarError("theme.yaml has a # in a flow collection")
         if ch in "[{":
             depth += 1
         elif ch in "]}":
@@ -1136,7 +1152,7 @@ def _top_level_lines(lines: list[str]) -> list[tuple[int, str]]:
         is_key = _scan_line(line, state)
         if line[0] == " " or line == "-" or line.startswith("- "):
             continue
-        if line[0] in _REFUSED_KEY_STARTS:
+        if line[0] in _REFUSED_KEY_STARTS or _MERGE_KEY_LINE.match(line):
             raise ManifestScalarError("theme.yaml has a complex top-level key")
         if not is_key:
             raise ManifestScalarError("theme.yaml has a top-level line with no key")
@@ -1176,16 +1192,372 @@ def _check_value_ends(lines: list[str], index: int) -> None:
         return
 
 
+# --- Whole-document shape check ---------------------------------------------
+# The line scan above finds the top-level keys; the check below walks every line
+# of the document against a small block-YAML subset (the forms safe_dump and the
+# built-in manifests write), so a document safe_load would reject is refused too.
+
+_MAX_NESTING = 32
+_SHAPE_KEY = re.compile(r"[A-Za-z_$][A-Za-z0-9_$.-]*")
+_SHAPE_KEY_LINE = re.compile(r"([A-Za-z_$][A-Za-z0-9_$.-]*|<<):(?= |$)")
+# Plain scalars that may resolve to a non-string and still construct cleanly.
+_SAFE_TYPED_PLAIN = re.compile(r"[-+]?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
+_ALWAYS_CONSTRUCTS = frozenset({"bool", "null"})
+_NUMBER_TAGS = frozenset({"int", "float"})
+# Characters that cannot start a block plain scalar; ``-?:`` may when a non-space
+# follows (PyYAML's check_plain in block context).
+_PLAIN_START_REFUSED = frozenset(",[]{}#&*!|>'\"%@`")
+_PLAIN_START_SPACED = frozenset("-?:")
+_FLOW_PLAIN = re.compile(r"(?:[A-Za-z0-9_$/~.+]|-(?=[A-Za-z0-9.]))[A-Za-z0-9_$/~.+ -]*")
+_BLOCK_SCALAR_HEADER = re.compile(r"[|>][-+]?(?: +#.*| *)")
+_SIMPLE_ESCAPES = frozenset('0abtnvfre "/\\N_LP')
+_HEX_ESCAPES = {"x": 2, "u": 4, "U": 8}
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _shape_error(what: str) -> ManifestScalarError:
+    return ManifestScalarError(f"theme.yaml has {what}")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _is_blank(line: str) -> bool:
+    return not line.strip(" ")
+
+
+def _is_dash(line: str, col: int) -> bool:
+    return line[col : col + 1] == "-" and line[col + 1 : col + 2] in ("", " ")
+
+
+def _check_plain_type(value: str) -> None:
+    """Refuse a plain scalar whose implicit type safe_load may fail to construct.
+
+    Only plain strings, booleans, nulls and simple decimal numbers pass: a
+    timestamp-shaped value (``2026-13-45``), ``0x_``, ``<<`` or ``=`` would raise.
+    """
+    tags = {
+        tag
+        for (tag, _pattern, _verbose), rx in zip(
+            YAML_IMPLICIT_RESOLVERS, _YAML_IMPLICIT_RESOLVER_REGEXES, strict=True
+        )
+        if rx.match(value)
+    }
+    if not tags or tags <= _ALWAYS_CONSTRUCTS:
+        return
+    if tags <= _NUMBER_TAGS and _SAFE_TYPED_PLAIN.fullmatch(value):
+        return
+    raise _shape_error("a plain value YAML may fail to construct")
+
+
+def _skip_comment_tail(line: str, pos: int) -> None:
+    """Allow only spaces, then nothing or a space-separated comment."""
+    i = _skip_space(line, pos)
+    if i == len(line) or (line[i] == "#" and i > pos):
+        return
+    raise _shape_error("text after a value")
+
+
+class _Shape:
+    """Recursive check of the block-YAML subset; refuses everything else."""
+
+    def __init__(self, lines: list[str], start: int) -> None:
+        self.lines = lines
+        self.start = start
+
+    def next_content(self, p: int) -> int:
+        lines = self.lines
+        while p < len(lines) and (
+            _is_blank(lines[p]) or lines[p].lstrip(" ").startswith("#")
+        ):
+            p += 1
+        return p
+
+    def check(self) -> None:
+        p = self.next_content(self.start)
+        if p == len(self.lines) or self.lines[p][0] == " ":
+            raise _shape_error("no top-level mapping")
+        p = self.mapping(p, 0, None, depth=0)
+        if p != len(self.lines):
+            raise _shape_error("a line outside the top-level mapping")
+
+    def node_below(self, p: int, parent_col: int, depth: int) -> int:
+        """The block node on the lines after a ``key:`` or ``-`` with no value."""
+        q = self.next_content(p)
+        if q == len(self.lines) or _indent(self.lines[q]) <= parent_col:
+            return q
+        col = _indent(self.lines[q])
+        if _is_dash(self.lines[q], col):
+            return self.sequence(q, col, depth + 1)
+        return self.mapping(q, col, None, depth + 1)
+
+    def after_node(self, q: int, col: int) -> int | None:
+        """Where a collection at ``col`` continues, or None when it has ended."""
+        if q == len(self.lines):
+            return None
+        indent = _indent(self.lines[q])
+        if indent > col:
+            raise _shape_error("indentation the reader does not model")
+        return q if indent == col else None
+
+    def mapping(self, p: int, col: int, first_col: int | None, depth: int) -> int:
+        if depth > _MAX_NESTING:
+            raise _shape_error("nesting deeper than the reader allows")
+        key_col = first_col if first_col is not None else col
+        while True:
+            line = self.lines[p]
+            match = _SHAPE_KEY_LINE.match(line, key_col)
+            if match is None:
+                raise _shape_error("a mapping line with no simple key")
+            is_merge = match.group(1) == "<<"
+            value_at = _skip_space(line, match.end())
+            if value_at == len(line) or (
+                line[value_at] == "#" and value_at > match.end()
+            ):
+                if is_merge:
+                    raise _shape_error("a merge key without a flow mapping")
+                q = self.next_content(p + 1)
+                if (
+                    q < len(self.lines)
+                    and _indent(self.lines[q]) == col
+                    and _is_dash(self.lines[q], col)
+                ):
+                    q = self.sequence(q, col, depth + 1)
+                else:
+                    q = self.node_below(p + 1, col, depth)
+            else:
+                if is_merge and (depth == 0 or line[value_at] != "{"):
+                    raise _shape_error("a merge key without a flow mapping")
+                q = self.next_content(
+                    self.inline_value(p, value_at, col, block_ok=True)
+                )
+            nxt = self.after_node(q, col)
+            if nxt is None:
+                return q
+            if _is_dash(self.lines[nxt], col):
+                raise _shape_error("a sequence item inside a mapping")
+            p, key_col = nxt, col
+
+    def sequence(self, p: int, col: int, depth: int) -> int:
+        if depth > _MAX_NESTING:
+            raise _shape_error("nesting deeper than the reader allows")
+        while True:
+            line = self.lines[p]
+            at = _skip_space(line, col + 1)
+            if at == len(line) or (line[at] == "#" and at > col + 1):
+                q = self.node_below(p + 1, col, depth)
+            elif _is_dash(line, at):
+                raise _shape_error("a nested compact sequence")
+            elif _SHAPE_KEY_LINE.match(line, at):
+                q = self.mapping(p, at, at, depth + 1)
+            else:
+                q = self.next_content(self.inline_value(p, at, col, block_ok=False))
+            nxt = self.after_node(q, col)
+            if nxt is None or not _is_dash(self.lines[nxt], col):
+                return q
+            p = nxt
+
+    def inline_value(self, p: int, i: int, parent_col: int, *, block_ok: bool) -> int:
+        """Check the value starting at ``lines[p][i]``; return the next line index."""
+        line = self.lines[p]
+        ch = line[i]
+        if ch in "'\"":
+            p, end = self.quoted(p, i, parent_col)
+            _skip_comment_tail(self.lines[p], end)
+            return p + 1
+        if ch in "[{":
+            _skip_comment_tail(line, _check_flow(line, i, 0))
+            return p + 1
+        if ch in "|>":
+            if not block_ok:
+                raise _shape_error("a block scalar outside a mapping value")
+            return self.block_scalar(p, i, parent_col)
+        return self.plain(p, i, parent_col)
+
+    def quoted(self, p: int, start: int, parent_col: int) -> tuple[int, int]:
+        lines = self.lines
+        line = lines[p]
+        quote = line[start]
+        i = start + 1
+        while True:
+            end = _quoted_line_end(line, i, quote)
+            if end is not None:
+                return p, end
+            p += 1
+            if p == len(lines):
+                raise _shape_error("a quoted scalar that never closes")
+            line = lines[p]
+            if not _is_blank(line) and _indent(line) <= parent_col:
+                raise _shape_error("a quoted scalar continued at a shallow indent")
+            i = 0
+
+    def block_scalar(self, p: int, i: int, parent_col: int) -> int:
+        if not _BLOCK_SCALAR_HEADER.fullmatch(self.lines[p], i):
+            raise _shape_error("a block scalar header the reader does not model")
+        lines = self.lines
+        q = p + 1
+        detected: int | None = None
+        longest_leading_blank = 0
+        while q < len(lines):
+            line = lines[q]
+            if _is_blank(line):
+                if detected is None:
+                    longest_leading_blank = max(longest_leading_blank, len(line))
+                q += 1
+                continue
+            indent = _indent(line)
+            if indent <= parent_col:
+                break
+            if detected is None:
+                detected = indent
+            elif indent < detected:
+                raise _shape_error("a block scalar line below its indentation")
+            q += 1
+        limit = detected if detected is not None else parent_col
+        if longest_leading_blank > limit:
+            raise _shape_error("a block scalar with over-indented leading blank lines")
+        return q
+
+    def plain(self, p: int, i: int, parent_col: int) -> int:
+        lines = self.lines
+        line = lines[p]
+        ch = line[i]
+        if ch in _PLAIN_START_REFUSED or (
+            ch in _PLAIN_START_SPACED and not line[i + 1 : i + 2].strip(" ")
+        ):
+            raise _shape_error("a value starting with an indicator")
+        pieces = [_plain_segment(line, i)]
+        separator = " "
+        q = p + 1
+        while q < len(lines):
+            nxt = lines[q]
+            if _is_blank(nxt):
+                separator = "\n" if separator == " " else separator + "\n"
+                q += 1
+                continue
+            if _indent(nxt) <= parent_col or nxt.lstrip(" ").startswith("#"):
+                break
+            pieces.append(separator + _plain_segment(nxt, _indent(nxt)))
+            separator = " "
+            q += 1
+        _check_plain_type("".join(pieces))
+        # Trailing blank lines are not part of the value; resume after the last piece.
+        while q > p + 1 and _is_blank(lines[q - 1]):
+            q -= 1
+        return q
+
+
+def _plain_segment(line: str, start: int) -> str:
+    """One line of a block plain scalar, refusing a key colon or a comment."""
+    text = line[start:].rstrip(" ")
+    if ": " in text or text.endswith(":") or " #" in text or text.startswith("#"):
+        raise _shape_error("a plain value with a key colon or a comment")
+    return text
+
+
+def _quoted_line_end(line: str, i: int, quote: str) -> int | None:
+    """Index past the closing quote on this line, or None to continue.
+
+    Double-quoted escapes are checked against PyYAML's table; an unknown escape,
+    short hex digits or a code point past U+10FFFF is refused.
+    """
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote == '"' and ch == "\\":
+            if i + 1 == n:
+                return None  # escaped line break
+            esc = line[i + 1]
+            if esc in _SIMPLE_ESCAPES:
+                i += 2
+                continue
+            width = _HEX_ESCAPES.get(esc)
+            digits = line[i + 2 : i + 2 + width] if width else ""
+            if (
+                width is None
+                or len(digits) != width
+                or not set(digits) <= _HEX_DIGITS
+                or int(digits, 16) > 0x10FFFF
+            ):
+                raise _shape_error("a double-quoted escape the reader does not model")
+            i += 2 + width
+            continue
+        if ch == quote:
+            if quote == "'" and line[i + 1 : i + 2] == "'":
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return None
+
+
+def _check_flow(line: str, i: int, depth: int) -> int:
+    """Check a one-line flow collection at ``line[i]``; return the index past it."""
+    if depth > _MAX_NESTING:
+        raise _shape_error("nesting deeper than the reader allows")
+    close = "]" if line[i] == "[" else "}"
+    i = _skip_space(line, i + 1)
+    if line[i : i + 1] == close:
+        return i + 1
+    while True:
+        if close == "}":
+            key = _SHAPE_KEY.match(line, i)
+            if key is None or line[key.end() : key.end() + 2] != ": ":
+                raise _shape_error("a flow mapping entry the reader does not model")
+            i = _skip_space(line, key.end() + 1)
+        i = _skip_space(line, _check_flow_value(line, i, depth))
+        ch = line[i : i + 1]
+        if ch == close:
+            return i + 1
+        if ch != ",":
+            raise _shape_error("a flow collection the reader does not model")
+        i = _skip_space(line, i + 1)
+        if line[i : i + 1] in ("", close):
+            raise _shape_error("a flow collection with an empty entry")
+
+
+def _check_flow_value(line: str, i: int, depth: int) -> int:
+    ch = line[i : i + 1]
+    if ch in ("'", '"'):
+        end = _quoted_line_end(line, i + 1, ch)
+        if end is None:
+            raise _shape_error("a flow collection that spans lines")
+        return end
+    if ch in ("[", "{"):
+        return _check_flow(line, i, depth + 1)
+    match = _FLOW_PLAIN.match(line, i)
+    if match is None:
+        raise _shape_error("a flow value the reader does not model")
+    _check_plain_type(match.group().rstrip(" "))
+    return match.end()
+
+
+def _check_document_shape(lines: list[str]) -> None:
+    """Refuse any document outside the block-YAML subset the reader models.
+
+    Within the subset every construct is one safe_load builds without error:
+    simple keys, block mappings and sequences at consistent indents, one-line
+    flow collections, quoted scalars with known escapes, block scalars, and plain
+    scalars whose implicit type always constructs.
+    """
+    if any("\t" in line for line in lines):
+        raise _shape_error("a tab")
+    _Shape(lines, 1 if lines and lines[0] == "---" else 0).check()
+
+
 def read_manifest_scalars(data: bytes) -> dict[str, str]:
     """Read ``id`` and ``version`` from ``theme.yaml`` bytes, refusing anything unsure.
 
-    Whenever this returns, ``yaml.safe_load`` of the same bytes is a mapping whose
-    ``id`` and ``version`` are the same strings. Plain values that YAML types as
-    non-strings are refused.
+    Whenever this returns, ``yaml.safe_load`` of the same bytes succeeds and is a
+    mapping whose ``id`` and ``version`` are the same strings. The whole document
+    must fit a block-YAML subset in which every construct loads without error, and
+    plain values that YAML types as non-strings are refused for id and version.
     Raises ``ManifestScalarError`` otherwise.
     """
     lines = _split_manifest_lines(data)
     _check_document_markers(lines)
+    _check_document_shape(lines)
     values: dict[str, str] = {}
     for index, line in _top_level_lines(lines):
         if not _IDENTITY_KEY_LINE.match(line):
@@ -1299,6 +1671,8 @@ def default_http_get(
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, (TimeoutError, socket.timeout)):
             raise OnlineUnavailableError("timeout") from None
+        raise OnlineUnavailableError("network") from None
+    except http.client.HTTPException:
         raise OnlineUnavailableError("network") from None
     except TimeoutError:
         raise OnlineUnavailableError("timeout") from None
@@ -1466,7 +1840,11 @@ class _OnlineRun:
 def _online_finding(
     index: int, name: str, code: str, field: str, message: str
 ) -> Finding:
-    return Finding(code, index, name, field, message)
+    return Finding(code, index, _entry_label("theme", name), field, message)
+
+
+def _unavailable(index: int, name: str, check: str, reason: str) -> Unavailable:
+    return Unavailable(_entry_label("theme", name) or f"#{index}", check, reason)
 
 
 def _check_repo(
@@ -1478,11 +1856,11 @@ def _check_repo(
     url = f"https://{_API_HOST}/repos/{org}/poppy-theme-{name}"
     result = run.get_with_retry(url, max_bytes=MAX_REPO_RESPONSE_BYTES, headers=headers)
     if isinstance(result, str):
-        return Unavailable(name, "repo", result)
+        return _unavailable(index, name, "repo", result)
     status = result.status
     reason = _status_reason(result)
     if reason is not None:
-        return Unavailable(name, "repo", reason)
+        return _unavailable(index, name, "repo", reason)
     if status == 404:
         return _online_finding(
             index, name, REPO_NOT_FOUND, "name", "repository not found or not public"
@@ -1492,14 +1870,14 @@ def _check_repo(
             index, name, REPO_MOVED, "name", "repository has moved or was renamed"
         )
     if status != 200:
-        return Unavailable(name, "repo", "unexpected_status")
+        return _unavailable(index, name, "repo", "unexpected_status")
     return _map_repo_body(result, index, name, org)
 
 
 def _map_repo_body(
     result: HttpResponse, index: int, name: str, org: str
 ) -> Finding | Unavailable | None:
-    malformed = Unavailable(name, "repo", "malformed")
+    malformed = _unavailable(index, name, "repo", "malformed")
     if result.over_cap:
         return malformed
     try:
@@ -1547,7 +1925,10 @@ def _map_repo_body(
 def _parse_tags(output: str) -> dict[str, str] | None:
     direct: dict[str, str] = {}
     peeled: dict[str, str] = {}
-    for line in output.splitlines():
+    lines = output.split("\n")
+    if not lines[-1]:
+        lines.pop()
+    for line in lines:
         if not TAG_LINE_PATTERN.fullmatch(line):
             return None
         sha, _, refname = line.partition("\t")
@@ -1565,17 +1946,17 @@ def _check_tags(
     run: _OnlineRun, index: int, entry: Mapping[str, object], name: str, org: str
 ) -> Finding | Unavailable | None:
     if run.remaining() < LS_REMOTE_TIMEOUT_SECONDS:
-        return Unavailable(name, "tags", "budget")
+        return _unavailable(index, name, "tags", "budget")
     try:
         output = run.ls_remote(
             f"https://github.com/{org}/poppy-theme-{name}.git",
             timeout=LS_REMOTE_TIMEOUT_SECONDS,
         )
     except OnlineUnavailableError as exc:
-        return Unavailable(name, "tags", exc.reason)
+        return _unavailable(index, name, "tags", exc.reason)
     tags = _parse_tags(output)
     if tags is None:
-        return Unavailable(name, "tags", "malformed")
+        return _unavailable(index, name, "tags", "malformed")
     ref = str(entry.get("ref"))
     wanted = f"v{entry.get('version')}"
     if wanted in tags:
@@ -1605,13 +1986,13 @@ def _check_manifest(
         headers={"User-Agent": "poppymarket-validate-registry"},
     )
     if isinstance(result, str):
-        return Unavailable(name, "manifest", result)
+        return _unavailable(index, name, "manifest", result)
     status = result.status
     reason = _status_reason(result)
     if reason is not None:
-        return Unavailable(name, "manifest", reason)
+        return _unavailable(index, name, "manifest", reason)
     if 300 <= status <= 399:
-        return Unavailable(name, "manifest", "redirect")
+        return _unavailable(index, name, "manifest", "redirect")
     if status == 200:
         return _map_manifest_body(result, index, entry, name)
     if 400 <= status <= 499:
@@ -1623,7 +2004,7 @@ def _check_manifest(
             "theme.yaml not found at ref; re-run the job if the tag was pushed "
             "in the last few minutes",
         )
-    return Unavailable(name, "manifest", "unexpected_status")
+    return _unavailable(index, name, "manifest", "unexpected_status")
 
 
 def _map_manifest_body(
@@ -1754,9 +2135,8 @@ def _key_of(item: object) -> tuple[str, str] | None:
 
 def _label(item: object, index: int) -> str:
     key = _key_of(item)
-    if key is not None and APP_NAME_PATTERN.fullmatch(key[1]):
-        return f"{key[0]}:{key[1]}"
-    return f"#{index}"
+    label = _entry_label(*key) if key is not None else None
+    return label or f"#{index}"
 
 
 def _stable(item: object) -> str:
@@ -1830,9 +2210,7 @@ def _compute_changes(
     if base is not None:
         for key, item in base.items():
             if key not in head_keys:
-                label = (
-                    f"{key[0]}:{key[1]}" if APP_NAME_PATTERN.fullmatch(key[1]) else "#-"
-                )
+                label = _entry_label(*key) or "#-"
                 changes.append(_diff_entry(label, "removed", {}, item))
     return changes
 
@@ -1848,6 +2226,8 @@ def _select_online(
     base: dict[tuple[str, str], dict[str, object]] | None,
     use_base: bool,
 ) -> list[tuple[int, Mapping[str, object]]]:
+    if any(f.code == DOC_TOO_MANY_ENTRIES for f in report.findings):
+        return []  # Its entries were never validated.
     blocked = {f.index for f in report.findings if f.index is not None}
     duplicated: set[tuple[str, str]] = set()
     for f in report.findings:
