@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "updated_at": "2026-03-19",
+  "updated_at": "2026-11-05",
   "apps": [
     {
       "name": "acorn",
@@ -34,6 +34,20 @@
         "Monitor autonomous code execution from coding agents",
         "Browse project documentation, specs, and architecture docs",
         "Run KitTools workflows (plan-feature, execute-feature, validate) from a UI"
+      ]
+    },
+    {
+      "name": "closeout-test",
+      "kind": "theme",
+      "display_name": "Closeout Test",
+      "description": "The stock Poppy look — dark glass, cyan accents, ambient circuit grid.",
+      "version": "0.1.0",
+      "author": "WashingBearLabs",
+      "repo_url": "https://github.com/WashingBearLabs/poppy-theme-closeout-test",
+      "ref": "4334806989bd36089377e463b65a04def92f3ad4",
+      "preview_image": "themes/closeout-test/preview.png",
+      "tags": [
+        "theme"
       ]
     }
   ]
