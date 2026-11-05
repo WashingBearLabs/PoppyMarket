@@ -166,3 +166,4 @@ latest push, with a passing `validate-registry` check on an up-to-date branch.
 |-----|-------------|--------|
 | Acorn Atelier | Visual development environment for managing software projects | WashingBearLabs |
 
+
