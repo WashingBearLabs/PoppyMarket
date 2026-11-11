@@ -1,4 +1,6 @@
-"""Structural validator for the theme registry.
+"""Structural validator for the PoppyMarket registry: theme and skin entries.
+
+It also checks a skin release's ``skin.yaml`` (``check_skin_manifest``).
 
 Standalone and stdlib-only: it runs as a plain script in the registry
 repository and is imported as a module by the test suite.
@@ -20,6 +22,7 @@ import stat
 import subprocess
 import sys
 import time as time
+import unicodedata
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -52,6 +55,8 @@ THEME_TEXT_CAPS = {
     "version": 64,
     "category": 40,
 }
+# registry.py _SKIN_TEXT_CAPS (SK-C1): the theme caps with a 280-character description.
+SKIN_TEXT_CAPS = {**THEME_TEXT_CAPS, "description": 280}
 MAX_THEME_TAGS = 20
 MAX_THEME_TAG_LENGTH = 32
 # registry.py _ASSET_PATH_FORBIDDEN; used with ``search``.
@@ -60,6 +65,8 @@ MAX_ASSET_PATH_LENGTH = 255
 # theme_repo_hosts.py _THEME_REPO_PATH; used with ``fullmatch``.
 THEME_REPO_PATH = re.compile(r"/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 THEME_PREVIEW_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+# Skins publish only skins/<name>/preview.png (SK-A21).
+SKIN_PREVIEW_EXTENSIONS = frozenset({".png"})
 ALLOWED_ASSET_EXTENSIONS = frozenset({".png", ".svg", ".jpg", ".jpeg"})
 # theme_repo_hosts.py DEFAULT_THEME_REPO_HOSTS.
 MAX_REGISTRY_ASSET_BYTES = 2 * 1024 * 1024
@@ -67,6 +74,7 @@ MAX_REGISTRY_ASSET_BYTES_PER_FETCH = 64 * 1024 * 1024
 # kind -> (asset fields, allowed extensions); mirrors Poppy's _ASSET_FIELDS_BY_KIND.
 ASSET_FIELDS_BY_KIND: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
     "theme": (("preview_image",), THEME_PREVIEW_EXTENSIONS),
+    "skin": (("preview_image",), SKIN_PREVIEW_EXTENSIONS),
     "app": (("icon", "hero_image"), ALLOWED_ASSET_EXTENSIONS),
 }
 
@@ -95,6 +103,14 @@ RESERVED_THEME_IDS = frozenset(
 )
 # manifest.py RESERVED_THEME_ID_PREFIXES.
 RESERVED_THEME_ID_PREFIXES: tuple[str, ...] = ("wb-",)
+# poppy/core/skins/layouts.py RESERVED_ROUTE_SEGMENT_IDS | BUILTIN_RESERVED_SKIN_IDS
+# | {"classic"}; RESERVED_SKIN_ID_PREFIXES. A Poppy-side test pins each one.
+RESERVED_SKIN_IDS = frozenset(
+    {"classic", "default", "marketplace", "installed", "topnav"}
+)
+RESERVED_SKIN_ID_PREFIXES: tuple[str, ...] = ("wb-", "poppy-")
+# SK-C4 skin id pattern, used with ``fullmatch``.
+SKIN_NAME_PATTERN = re.compile(r"[a-z][a-z0-9-]{1,31}")
 # Mirror of poppy/core/workbench/release_text.py PUBLIC_TEXT_REFUSED (WP-C19).
 # Read with ``ast`` by Poppy's parity test, so it stays one top-level annotated
 # assignment of a set display of hex integer literals. All of Cc (U+0000-001F,
@@ -154,6 +170,7 @@ _DISPLAY_TEXT_FIELDS = (
 
 # Document codes.
 DOC_UNREADABLE = "DOC_UNREADABLE"
+DOC_SKIN_CATALOG = "DOC_SKIN_CATALOG"
 DOC_TOO_LARGE = "DOC_TOO_LARGE"
 DOC_NOT_UTF8 = "DOC_NOT_UTF8"
 DOC_INVALID_JSON = "DOC_INVALID_JSON"
@@ -181,7 +198,7 @@ DOC_ASSETS_TOO_LARGE = "DOC_ASSETS_TOO_LARGE"
 UNKNOWN_FIELD = "<unknown>"
 _TOP_LEVEL_KEYS = ("version", "updated_at", "apps")
 _REQUIRED_TEXT_FIELDS = ("name", "description", "version", "author")
-_KINDS = ("app", "theme")
+_KINDS = ("app", "theme", "skin")
 _OPTIONAL_STRING_FIELDS = (
     "display_name",
     "long_description",
@@ -337,7 +354,7 @@ def validate_entry(entry: object, *, org: str = THEME_REPO_OWNER) -> list[Findin
         if not isinstance(raw_kind, str):
             add(ENTRY_FIELD_TYPE, "kind", "Field must be a string.")
         elif raw_kind not in _KINDS:
-            add(ENTRY_FIELD_INVALID, "kind", "Field must be 'app' or 'theme'.")
+            add(ENTRY_FIELD_INVALID, "kind", "Field must be 'app', 'theme' or 'skin'.")
 
     for field in _REQUIRED_TEXT_FIELDS:
         if field not in item:
@@ -405,28 +422,32 @@ def _check_shared_entry_rules(
         if sources_typed and not text("image") and not text("repo_url"):
             add(ENTRY_FIELD_MISSING, "image", "An app needs an image or a repo_url.")
         return
-    if kind != "theme":
+    if kind not in ("theme", "skin"):
         return
 
     repo_url = text("repo_url")
     if "repo_url" in typed_ok:
         if not repo_url:
-            add(ENTRY_FIELD_MISSING, "repo_url", "A theme requires a repo_url.")
+            add(ENTRY_FIELD_MISSING, "repo_url", f"A {kind} requires a repo_url.")
         else:
             problem = _theme_repo_url_problem(repo_url)
             if problem is not None:
                 add(ENTRY_FIELD_INVALID, "repo_url", problem)
     elif "repo_url" not in item:
-        add(ENTRY_FIELD_MISSING, "repo_url", "A theme requires a repo_url.")
+        add(ENTRY_FIELD_MISSING, "repo_url", f"A {kind} requires a repo_url.")
     if item.get("ref") is None:
-        add(ENTRY_FIELD_MISSING, "ref", "A theme requires a ref.")
+        add(ENTRY_FIELD_MISSING, "ref", f"A {kind} requires a ref.")
+    preview_extensions = (
+        SKIN_PREVIEW_EXTENSIONS if kind == "skin" else THEME_PREVIEW_EXTENSIONS
+    )
+    text_caps = SKIN_TEXT_CAPS if kind == "skin" else THEME_TEXT_CAPS
     preview = text("preview_image")
     if preview is not None:
         try:
-            validate_registry_asset_path(preview, THEME_PREVIEW_EXTENSIONS)
+            validate_registry_asset_path(preview, preview_extensions)
         except ValueError:
             add(ENTRY_FIELD_INVALID, "preview_image", "Preview path is not valid.")
-    for field, cap in THEME_TEXT_CAPS.items():
+    for field, cap in text_caps.items():
         value = item.get(field)
         if isinstance(value, str) and len(value) > cap:
             add(ENTRY_FIELD_INVALID, field, "Field is longer than its limit.")
@@ -493,6 +514,10 @@ def _check_policy_rules(
         _check_app_policy(item, add)
         return
 
+    if kind == "skin":
+        _check_skin_policy(item, org, add)
+        return
+
     name = string("name")
     valid_name = name if name and APP_NAME_PATTERN.fullmatch(name) else None
     if valid_name is not None and (
@@ -550,6 +575,87 @@ def _check_policy_rules(
                         "preview_image",
                         "Preview must be themes/<name>/preview.<ext>.",
                     )
+
+    version = string("version")
+    if version and (
+        not SEMVER_PATTERN.fullmatch(version) or _tag_version_problem(version)
+    ):
+        add(ENTRY_FIELD_INVALID, "version", "Version is not a valid release.")
+
+
+def _check_skin_policy(
+    item: dict[str, object], org: str, add: Callable[[str, str, str], None]
+) -> None:
+    """The skin branch of ``_check_policy_rules`` (mirrors the theme branch)."""
+
+    def string(field: str) -> str | None:
+        value = item.get(field)
+        return value if isinstance(value, str) else None
+
+    name = string("name")
+    valid_name: str | None = None
+    if name is not None and name != "":
+        if not SKIN_NAME_PATTERN.fullmatch(name):
+            add(
+                ENTRY_FIELD_INVALID,
+                "name",
+                "Skin name must be 2\u201332 characters: a lowercase letter, then "
+                "lowercase letters, digits or hyphens.",
+            )
+        elif name in RESERVED_SKIN_IDS or name.startswith(RESERVED_SKIN_ID_PREFIXES):
+            add(ENTRY_NAME_RESERVED, "name", "Skin name is reserved.")
+        else:
+            valid_name = name
+
+    unknown = False
+    for key in item:
+        if key in _THEME_ALLOWED_KEYS or key in ("source", "_source"):
+            continue
+        if key in _THEME_FORBIDDEN_NAMED:
+            add(ENTRY_FIELD_FORBIDDEN, key, "A skin must not set this field.")
+        else:
+            unknown = True
+    if unknown:
+        add(
+            ENTRY_FIELD_FORBIDDEN,
+            UNKNOWN_FIELD,
+            "Entry has a field a skin may not set.",
+        )
+
+    repo_url = string("repo_url")
+    if (
+        repo_url
+        and valid_name is not None
+        and _theme_repo_url_problem(repo_url) is None
+    ):
+        expected = f"https://github.com/{org}/poppy-skin-{valid_name}"
+        if repo_url not in (expected, expected + ".git"):
+            add(
+                ENTRY_FIELD_INVALID,
+                "repo_url",
+                "Repository must be the owner's poppy-skin-<name> repository.",
+            )
+
+    if item.get("preview_image") is None:
+        add(ENTRY_FIELD_MISSING, "preview_image", "A skin requires a preview_image.")
+    else:
+        preview = string("preview_image")
+        if (
+            preview is not None
+            and valid_name is not None
+            and preview != f"skins/{valid_name}/preview.png"
+        ):
+            # The generic path rule already reported malformed paths.
+            try:
+                validate_registry_asset_path(preview, SKIN_PREVIEW_EXTENSIONS)
+            except ValueError:
+                pass
+            else:
+                add(
+                    ENTRY_FIELD_INVALID,
+                    "preview_image",
+                    "Preview must be skins/<name>/preview.png.",
+                )
 
     version = string("version")
     if version and (
@@ -738,7 +844,9 @@ def _entry_file_results(
     findings: list[Finding] = []
     sizes: dict[str, int] = {}
     for field, rel in _asset_paths(entry):
-        code, message, size = _inspect_file(root, rel, check_magic=kind == "theme")
+        code, message, size = _inspect_file(
+            root, rel, check_magic=kind in ("theme", "skin")
+        )
         if size is not None:
             sizes[rel] = size
         if code is not None:
@@ -1587,8 +1695,12 @@ LS_REMOTE_GIT_CONFIG: tuple[str, ...] = (
     "http.followRedirects=false",
     "core.hooksPath=/dev/null",
 )
+_RELEASE_REPO_PREFIX = {"theme": "poppy-theme-", "skin": "poppy-skin-"}
+_MANIFEST_FILE = {"theme": "theme.yaml", "skin": "skin.yaml"}
 _LS_REMOTE_URL = re.compile(
-    r"https://github\.com/[A-Za-z0-9-]+/poppy-theme-[a-z0-9-]+\.git"
+    r"https://github\.com/[A-Za-z0-9-]+/(?:"
+    + "|".join(re.escape(p) for p in _RELEASE_REPO_PREFIX.values())
+    + r")[a-z0-9-]+\.git"
 )
 _API_HOST = "api.github.com"
 _RAW_HOST = "raw.githubusercontent.com"
@@ -1838,46 +1950,53 @@ class _OnlineRun:
 
 
 def _online_finding(
-    index: int, name: str, code: str, field: str, message: str
+    kind: str, index: int, name: str, code: str, field: str, message: str
 ) -> Finding:
-    return Finding(code, index, _entry_label("theme", name), field, message)
+    return Finding(code, index, _entry_label(kind, name), field, message)
 
 
-def _unavailable(index: int, name: str, check: str, reason: str) -> Unavailable:
-    return Unavailable(_entry_label("theme", name) or f"#{index}", check, reason)
+def _unavailable(
+    kind: str, index: int, name: str, check: str, reason: str
+) -> Unavailable:
+    return Unavailable(_entry_label(kind, name) or f"#{index}", check, reason)
 
 
 def _check_repo(
-    run: _OnlineRun, index: int, name: str, org: str, token: str | None
+    run: _OnlineRun, kind: str, index: int, name: str, org: str, token: str | None
 ) -> Finding | Unavailable | None:
     headers = dict(_GITHUB_API_HEADERS)
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    url = f"https://{_API_HOST}/repos/{org}/poppy-theme-{name}"
+    url = f"https://{_API_HOST}/repos/{org}/{_RELEASE_REPO_PREFIX[kind]}{name}"
     result = run.get_with_retry(url, max_bytes=MAX_REPO_RESPONSE_BYTES, headers=headers)
     if isinstance(result, str):
-        return _unavailable(index, name, "repo", result)
+        return _unavailable(kind, index, name, "repo", result)
     status = result.status
     reason = _status_reason(result)
     if reason is not None:
-        return _unavailable(index, name, "repo", reason)
+        return _unavailable(kind, index, name, "repo", reason)
     if status == 404:
         return _online_finding(
-            index, name, REPO_NOT_FOUND, "name", "repository not found or not public"
+            kind,
+            index,
+            name,
+            REPO_NOT_FOUND,
+            "name",
+            "repository not found or not public",
         )
     if status in _REPO_REDIRECT_STATUSES:
         return _online_finding(
-            index, name, REPO_MOVED, "name", "repository has moved or was renamed"
+            kind, index, name, REPO_MOVED, "name", "repository has moved or was renamed"
         )
     if status != 200:
-        return _unavailable(index, name, "repo", "unexpected_status")
-    return _map_repo_body(result, index, name, org)
+        return _unavailable(kind, index, name, "repo", "unexpected_status")
+    return _map_repo_body(result, kind, index, name, org)
 
 
 def _map_repo_body(
-    result: HttpResponse, index: int, name: str, org: str
+    result: HttpResponse, kind: str, index: int, name: str, org: str
 ) -> Finding | Unavailable | None:
-    malformed = _unavailable(index, name, "repo", "malformed")
+    malformed = _unavailable(kind, index, name, "repo", "malformed")
     if result.over_cap:
         return malformed
     try:
@@ -1905,19 +2024,29 @@ def _map_repo_body(
         return malformed
     if private:
         return _online_finding(
-            index, name, REPO_NOT_PUBLIC, "name", "repository is not public"
+            kind, index, name, REPO_NOT_PUBLIC, "name", "repository is not public"
         )
     if archived:
         return _online_finding(
-            index, name, REPO_ARCHIVED, "name", "repository is archived"
+            kind, index, name, REPO_ARCHIVED, "name", "repository is archived"
         )
     if login != org:
         return _online_finding(
-            index, name, REPO_OWNER_MISMATCH, "name", "repository owner is not the org"
+            kind,
+            index,
+            name,
+            REPO_OWNER_MISMATCH,
+            "name",
+            "repository owner is not the org",
         )
-    if repo_name != f"poppy-theme-{name}":
+    if repo_name != f"{_RELEASE_REPO_PREFIX[kind]}{name}":
         return _online_finding(
-            index, name, REPO_NAME_MISMATCH, "name", "repository name does not match"
+            kind,
+            index,
+            name,
+            REPO_NAME_MISMATCH,
+            "name",
+            "repository name does not match",
         )
     return None
 
@@ -1943,100 +2072,180 @@ def _parse_tags(output: str) -> dict[str, str] | None:
 
 
 def _check_tags(
-    run: _OnlineRun, index: int, entry: Mapping[str, object], name: str, org: str
+    run: _OnlineRun,
+    kind: str,
+    index: int,
+    entry: Mapping[str, object],
+    name: str,
+    org: str,
 ) -> Finding | Unavailable | None:
     if run.remaining() < LS_REMOTE_TIMEOUT_SECONDS:
-        return _unavailable(index, name, "tags", "budget")
+        return _unavailable(kind, index, name, "tags", "budget")
     try:
         output = run.ls_remote(
-            f"https://github.com/{org}/poppy-theme-{name}.git",
+            f"https://github.com/{org}/{_RELEASE_REPO_PREFIX[kind]}{name}.git",
             timeout=LS_REMOTE_TIMEOUT_SECONDS,
         )
     except OnlineUnavailableError as exc:
-        return _unavailable(index, name, "tags", exc.reason)
+        return _unavailable(kind, index, name, "tags", exc.reason)
     tags = _parse_tags(output)
     if tags is None:
-        return _unavailable(index, name, "tags", "malformed")
+        return _unavailable(kind, index, name, "tags", "malformed")
     ref = str(entry.get("ref"))
     wanted = f"v{entry.get('version')}"
     if wanted in tags:
         if tags[wanted] == ref:
             return None
         return _online_finding(
-            index, name, TAG_MISMATCH, "ref", "tag v<version> does not point at ref"
+            kind,
+            index,
+            name,
+            TAG_MISMATCH,
+            "ref",
+            "tag v<version> does not point at ref",
         )
     if ref in tags.values():
         return _online_finding(
+            kind,
             index,
             name,
             TAG_MISMATCH,
             "ref",
             "tag v<version> is missing; ref has another tag",
         )
-    return _online_finding(index, name, REF_NOT_TAGGED, "ref", "ref is not tagged")
+    return _online_finding(
+        kind, index, name, REF_NOT_TAGGED, "ref", "ref is not tagged"
+    )
 
 
 def _check_manifest(
-    run: _OnlineRun, index: int, entry: Mapping[str, object], name: str, org: str
-) -> Finding | Unavailable | None:
-    url = f"https://{_RAW_HOST}/{org}/poppy-theme-{name}/{entry.get('ref')}/theme.yaml"
+    run: _OnlineRun,
+    kind: str,
+    index: int,
+    entry: Mapping[str, object],
+    name: str,
+    org: str,
+) -> list[Finding | Unavailable]:
+    manifest_file = _MANIFEST_FILE[kind]
+    url = (
+        f"https://{_RAW_HOST}/{org}/{_RELEASE_REPO_PREFIX[kind]}{name}/"
+        f"{entry.get('ref')}/{manifest_file}"
+    )
     result = run.get_with_retry(
         url,
-        max_bytes=MAX_MANIFEST_BYTES,
+        max_bytes=MAX_SKIN_MANIFEST_BYTES if kind == "skin" else MAX_MANIFEST_BYTES,
         headers={"User-Agent": "poppymarket-validate-registry"},
     )
     if isinstance(result, str):
-        return _unavailable(index, name, "manifest", result)
+        return [_unavailable(kind, index, name, "manifest", result)]
     status = result.status
     reason = _status_reason(result)
     if reason is not None:
-        return _unavailable(index, name, "manifest", reason)
+        return [_unavailable(kind, index, name, "manifest", reason)]
     if 300 <= status <= 399:
-        return _unavailable(index, name, "manifest", "redirect")
+        return [_unavailable(kind, index, name, "manifest", "redirect")]
     if status == 200:
-        return _map_manifest_body(result, index, entry, name)
+        return _map_manifest_body(result, kind, index, entry, name)
     if 400 <= status <= 499:
-        return _online_finding(
-            index,
-            name,
-            MANIFEST_MISSING,
-            "ref",
-            "theme.yaml not found at ref; re-run the job if the tag was pushed "
-            "in the last few minutes",
+        return [
+            _online_finding(
+                kind,
+                index,
+                name,
+                MANIFEST_MISSING,
+                "ref",
+                f"{manifest_file} not found at ref; re-run the job if the tag was "
+                "pushed in the last few minutes",
+            )
+        ]
+    return [_unavailable(kind, index, name, "manifest", "unexpected_status")]
+
+
+def _map_skin_manifest_body(
+    result: HttpResponse, index: int, entry: Mapping[str, object], name: str
+) -> list[Finding | Unavailable]:
+    kind = "skin"
+    if result.over_cap:
+        return [
+            _online_finding(
+                kind, index, name, MANIFEST_TOO_LARGE, "ref", "skin.yaml is too large"
+            )
+        ]
+    try:
+        doc = read_skin_manifest(result.body)
+    except SkinManifestUnreadableError:
+        return [
+            _online_finding(
+                kind,
+                index,
+                name,
+                SKIN_MANIFEST_UNREADABLE,
+                "ref",
+                SKIN_MANIFEST_UNREADABLE_MESSAGE,
+            )
+        ]
+    return [
+        _online_finding(kind, index, name, code, path or "ref", message)
+        for code, path, message in check_skin_manifest(
+            doc,
+            load_skin_catalog(),
+            expected_id=name,
+            expected_version=str(entry.get("version")),
         )
-    return _unavailable(index, name, "manifest", "unexpected_status")
+    ]
 
 
 def _map_manifest_body(
-    result: HttpResponse, index: int, entry: Mapping[str, object], name: str
-) -> Finding | None:
+    result: HttpResponse,
+    kind: str,
+    index: int,
+    entry: Mapping[str, object],
+    name: str,
+) -> list[Finding | Unavailable]:
+    if kind == "skin":
+        return _map_skin_manifest_body(result, index, entry, name)
     if result.over_cap:
-        return _online_finding(
-            index, name, MANIFEST_TOO_LARGE, "ref", "theme.yaml is too large"
-        )
+        return [
+            _online_finding(
+                kind, index, name, MANIFEST_TOO_LARGE, "ref", "theme.yaml is too large"
+            )
+        ]
     try:
         values = read_manifest_scalars(result.body)
     except ManifestScalarError:
-        return _online_finding(
-            index, name, MANIFEST_UNPARSEABLE, "ref", "theme.yaml could not be read"
-        )
+        return [
+            _online_finding(
+                kind,
+                index,
+                name,
+                MANIFEST_UNPARSEABLE,
+                "ref",
+                "theme.yaml could not be read",
+            )
+        ]
     if values["id"] != name:
-        return _online_finding(
-            index,
-            name,
-            MANIFEST_ID_MISMATCH,
-            "ref",
-            "theme.yaml id does not match name",
-        )
+        return [
+            _online_finding(
+                kind,
+                index,
+                name,
+                MANIFEST_ID_MISMATCH,
+                "ref",
+                "theme.yaml id does not match name",
+            )
+        ]
     if values["version"] != entry.get("version"):
-        return _online_finding(
-            index,
-            name,
-            MANIFEST_VERSION_MISMATCH,
-            "version",
-            "theme.yaml version does not match version",
-        )
-    return None
+        return [
+            _online_finding(
+                kind,
+                index,
+                name,
+                MANIFEST_VERSION_MISMATCH,
+                "version",
+                "theme.yaml version does not match version",
+            )
+        ]
+    return []
 
 
 def run_online_checks(
@@ -2050,7 +2259,11 @@ def run_online_checks(
     api_token: str | None = None,
     budget_seconds: float = ONLINE_BUDGET_SECONDS,
 ) -> tuple[list[Finding], list[Unavailable]]:
-    """Check each selected theme entry against GitHub within a time budget."""
+    """Check each selected theme or skin entry against its release repo on GitHub.
+
+    The entry's ``kind`` (default ``theme``) picks the repo prefix and the
+    manifest file; every step is bounded by one shared time budget.
+    """
     run = _OnlineRun(
         http_get=http_get,
         ls_remote=ls_remote,
@@ -2062,10 +2275,16 @@ def run_online_checks(
     unavailable: list[Unavailable] = []
     for index, entry in entries:
         name = str(entry.get("name"))
+        raw_kind = entry.get("kind")
+        kind = (
+            raw_kind
+            if isinstance(raw_kind, str) and raw_kind in _RELEASE_REPO_PREFIX
+            else "theme"
+        )
         outcomes = (
-            _check_repo(run, index, name, org, api_token),
-            _check_tags(run, index, entry, name, org),
-            _check_manifest(run, index, entry, name, org),
+            _check_repo(run, kind, index, name, org, api_token),
+            _check_tags(run, kind, index, entry, name, org),
+            *_check_manifest(run, kind, index, entry, name, org),
         )
         for outcome in outcomes:
             if isinstance(outcome, Finding):
@@ -2238,7 +2457,12 @@ def _select_online(
     selected: list[tuple[int, Mapping[str, object]]] = []
     for index, item in enumerate(head):
         key = _key_of(item)
-        if key is None or key[0] != "theme" or key in duplicated or index in blocked:
+        if (
+            key is None
+            or key[0] not in _RELEASE_REPO_PREFIX
+            or key in duplicated
+            or index in blocked
+        ):
             continue
         entry = cast("dict[str, object]", item)
         if (
@@ -2303,6 +2527,645 @@ def _json_report(
     return json.dumps(payload, indent=2)
 
 
+SKIN_CATALOG_ERROR_MESSAGE = "the vendored skin catalog is missing or malformed"
+_SKIN_CATALOG_KEYS: dict[str, type | tuple[type, ...]] = {
+    "schema": int,
+    "platform_level": int,
+    "nav_placements": list,
+    "nav_labels": list,
+    "chat_placements": list,
+    "chat_sides": list,
+    "initials": dict,
+    "workspace_max_widths": dict,
+    "workspace_aligns": list,
+    "mobile_breakpoint_px": int,
+    "presentation_variants": dict,
+}
+
+
+class SkinCatalogError(Exception):
+    """The vendored skin catalog is missing or malformed (fixed message)."""
+
+    def __init__(self) -> None:
+        super().__init__(SKIN_CATALOG_ERROR_MESSAGE)
+
+
+def load_skin_catalog(path: Path | None = None) -> dict[str, object]:
+    """Read the vendored copy of Poppy's skin catalog; raise SkinCatalogError."""
+    target = path if path is not None else Path(__file__).with_name("skin_catalog.json")
+    try:
+        loaded = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise SkinCatalogError from None
+    if not isinstance(loaded, dict):
+        raise SkinCatalogError
+    catalog = cast("dict[str, object]", loaded)
+    for key, expected in _SKIN_CATALOG_KEYS.items():
+        value = catalog.get(key)
+        if not isinstance(value, expected) or isinstance(value, bool):
+            raise SkinCatalogError
+    return catalog
+
+
+# --- Fail-closed skin.yaml reader --------------------------------------------
+# Reads exactly the block-YAML form Poppy's dump_canonical (PyYAML safe_dump,
+# allow_unicode, width 4096) writes and returns what yaml.safe_load would; any
+# other form raises SkinManifestUnreadableError.
+
+MAX_SKIN_MANIFEST_BYTES = 16 * 1024
+SKIN_MANIFEST_UNREADABLE_MESSAGE = "skin.yaml is not in the form Poppy writes"
+_SKIN_MAX_LEVEL = 3  # indent 0..6: top level -> layout -> nav -> placement
+_SKIN_KEY = re.compile(r"[A-Za-z_$][A-Za-z0-9_$.-]*")
+_SKIN_DIGITS = re.compile(r"0|[1-9][0-9]*")
+# Characters PyYAML's scanner treats as line breaks besides "\n" (and "\r").
+_SKIN_RAW_BREAKS = ("\x85", chr(0x2028), chr(0x2029))
+_SKIN_BREAKS = frozenset(("\n", *_SKIN_RAW_BREAKS))
+# The escapes PyYAML's emitter writes (ESCAPE_REPLACEMENTS), plus the hex forms.
+_SKIN_SIMPLE_ESCAPES = {
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "v": "\v",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    '"': '"',
+    "\\": "\\",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": chr(0x2028),
+    "P": chr(0x2029),
+}
+
+
+class SkinManifestUnreadableError(Exception):
+    """skin.yaml is outside the form Poppy writes (fixed message, no input)."""
+
+    def __init__(self) -> None:
+        super().__init__(SKIN_MANIFEST_UNREADABLE_MESSAGE)
+
+
+def _skin_tail_ok(line: str, pos: int) -> bool:
+    """Only spaces, then nothing or a space-separated comment, from ``pos``."""
+    i = _skip_space(line, pos)
+    return i == len(line) or (line[i] == "#" and i > pos and line[i - 1] == " ")
+
+
+def _skin_single_quoted(text: str, start: int, level: int) -> tuple[str, int]:
+    """Decode the single-quoted scalar opening at ``text[start]``.
+
+    PyYAML writes a line break inside single quotes as the raw break run
+    (``\\n`` doubled) followed by the continuation indent, and reads it back
+    by YAML folding. Only that form is accepted; it is decoded the way PyYAML's
+    scanner does. Returns the value and the index just past the closing quote.
+    """
+    indent = " " * (2 * level + 2)
+    out: list[str] = []
+    i = start + 1
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            if text[i + 1 : i + 2] == "'":
+                out.append("'")
+                i += 2
+                continue
+            return "".join(out), i + 1
+        if ch in _SKIN_BREAKS:
+            j = i
+            while j < n and text[j] in _SKIN_BREAKS:
+                j += 1
+            after = j + len(indent)
+            if (
+                text[i - 1] == " "
+                or text[j:after] != indent
+                or text[after : after + 1] in ("", " ")
+            ):
+                raise SkinManifestUnreadableError
+            run = ["\n" if brk in "\n\x85" else brk for brk in text[i:j]]
+            if run[0] != "\n":
+                out.append(run[0])
+            elif len(run) == 1:
+                out.append(" ")
+            out.extend(run[1:])
+            i = after
+            continue
+        if ch == "\t":
+            raise SkinManifestUnreadableError
+        out.append(ch)
+        i += 1
+    raise SkinManifestUnreadableError
+
+
+def _skin_double_quoted(line: str, start: int) -> tuple[str, int]:
+    """Decode a one-line double-quoted scalar; return (value, index past quote)."""
+    out: list[str] = []
+    i = start + 1
+    while i < len(line):
+        ch = line[i]
+        if ch == '"':
+            return "".join(out), i + 1
+        if ch == "\t":
+            raise SkinManifestUnreadableError
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        esc = line[i + 1 : i + 2]
+        if esc in _SKIN_SIMPLE_ESCAPES:
+            out.append(_SKIN_SIMPLE_ESCAPES[esc])
+            i += 2
+            continue
+        width = _HEX_ESCAPES.get(esc)
+        if width is None:
+            raise SkinManifestUnreadableError
+        digits = line[i + 2 : i + 2 + width]
+        if len(digits) != width or not all(d in _HEX_DIGITS for d in digits):
+            raise SkinManifestUnreadableError
+        code = int(digits, 16)
+        if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+            raise SkinManifestUnreadableError
+        out.append(chr(code))
+        i += 2 + width
+    raise SkinManifestUnreadableError
+
+
+def _skin_plain(text: str) -> str | bool | int:
+    cut = text.find(" #")
+    value = (text if cut < 0 else text[:cut]).rstrip(" ")
+    first = value[:1]
+    if (
+        not value
+        or "\t" in value
+        or ": " in value
+        or value.endswith(":")
+        or first in _PLAIN_START_REFUSED
+        or (first in _PLAIN_START_SPACED and value[1:2] in ("", " "))
+    ):
+        raise SkinManifestUnreadableError
+    _check_plain_type(value)
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    if _SKIN_DIGITS.fullmatch(value):
+        return int(value)
+    if any(rx.match(value) for rx in _YAML_IMPLICIT_RESOLVER_REGEXES):
+        raise SkinManifestUnreadableError
+    return value
+
+
+def _skin_key_line(line: str) -> tuple[int, str, int]:
+    """Split a content line into (level, key, index where the value starts)."""
+    body = line.lstrip(" ")
+    indent = len(line) - len(body)
+    if indent % 2 or indent // 2 > _SKIN_MAX_LEVEL or body[:1] in _REFUSED_KEY_STARTS:
+        raise SkinManifestUnreadableError
+    match = _SKIN_KEY.match(body)
+    if match is None or body[match.end() : match.end() + 1] != ":":
+        raise SkinManifestUnreadableError
+    key = match.group(0)
+    if any(rx.match(key) for rx in _YAML_IMPLICIT_RESOLVER_REGEXES):
+        raise SkinManifestUnreadableError
+    colon = indent + match.end()
+    if line[colon + 1 : colon + 2] not in ("", " "):
+        raise SkinManifestUnreadableError
+    return indent // 2, key, _skip_space(line, colon + 1)
+
+
+def _skin_has_break(text: str) -> bool:
+    return any(brk in text for brk in _SKIN_RAW_BREAKS)
+
+
+def _read_skin_text(text: str) -> dict[str, object]:
+    root: dict[str, object] = {}
+    stack: list[dict[str, object]] = [root]
+    pending: tuple[int, dict[str, object]] | None = None
+    pos = 0
+    while pos <= len(text):
+        end = text.find("\n", pos)
+        end = len(text) if end < 0 else end
+        line = text[pos:end]
+        if not line.strip(" ") or line.lstrip(" ").startswith("#"):
+            if _skin_has_break(line):
+                raise SkinManifestUnreadableError
+            pos = end + 1
+            continue
+        level, key, vstart = _skin_key_line(line)
+        if pending is not None:
+            if level != pending[0]:
+                raise SkinManifestUnreadableError
+            stack = [*stack[:level], pending[1]]
+            pending = None
+        elif level >= len(stack):
+            raise SkinManifestUnreadableError
+        else:
+            del stack[level + 1 :]
+        current = stack[level]
+        if key in current:
+            raise SkinManifestUnreadableError
+        value_text = line[vstart:]
+        if value_text.startswith("'"):
+            value, close = _skin_single_quoted(text, pos + vstart, level)
+            end = text.find("\n", close)
+            end = len(text) if end < 0 else end
+            rest = text[close:end]
+            if _skin_has_break(rest) or not _skin_tail_ok(rest, 0):
+                raise SkinManifestUnreadableError
+            current[key] = value
+        elif _skin_has_break(line):
+            raise SkinManifestUnreadableError
+        elif not value_text or value_text.startswith("#"):
+            child: dict[str, object] = {}
+            current[key] = child
+            pending = (level + 1, child)
+        elif value_text.startswith('"'):
+            value, close = _skin_double_quoted(line, vstart)
+            if not _skin_tail_ok(line, close):
+                raise SkinManifestUnreadableError
+            current[key] = value
+        else:
+            current[key] = _skin_plain(value_text)
+        pos = end + 1
+    if pending is not None or not root:
+        raise SkinManifestUnreadableError
+    return root
+
+
+def read_skin_manifest(data: bytes) -> dict[str, object]:
+    """Fail-closed reader for the block-YAML form ``dump_canonical`` writes.
+
+    Returns what ``yaml.safe_load`` would return for that form; raises
+    ``SkinManifestUnreadableError`` (fixed message) for anything else.
+    """
+    if len(data) > MAX_SKIN_MANIFEST_BYTES:
+        raise SkinManifestUnreadableError
+    try:
+        text = data.decode("utf-8")
+        # The theme line checks refuse the raw breaks PyYAML writes inside
+        # single quotes; swap each for an unused private-use stand-in for the
+        # shared checks, then restore them for the reader, which allows them
+        # only inside a single-quoted scalar.
+        spare = (chr(c) for c in range(0xF8FF, 0xDFFF, -1) if chr(c) not in text)
+        stand_ins = {brk: next(spare) for brk in _SKIN_RAW_BREAKS}
+        for brk, mark in stand_ins.items():
+            text = text.replace(brk, mark)
+        lines = _split_manifest_lines(text.encode("utf-8"))
+        _check_document_markers(lines)
+        if any(_DOCUMENT_MARKER.match(line) for line in lines):
+            raise SkinManifestUnreadableError
+        text = "\n".join(lines)
+        for brk, mark in stand_ins.items():
+            text = text.replace(mark, brk)
+        return _read_skin_text(text)
+    except SkinManifestUnreadableError:
+        raise SkinManifestUnreadableError from None
+    except (ManifestScalarError, ValueError, StopIteration):  # incl. UnicodeError
+        raise SkinManifestUnreadableError from None
+
+
+SKIN_MANIFEST_INVALID = "SKIN_MANIFEST_INVALID"
+SKIN_MANIFEST_UNREADABLE = "SKIN_MANIFEST_UNREADABLE"
+SKIN_NAME_MAX = 40
+SKIN_DESCRIPTION_MAX = 280
+_SKIN_TEXT_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
+_SKIN_TEXT_FORBIDDEN_CHARS = frozenset("<>`")
+_SKIN_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+_SKIN_PLATFORM = re.compile(r">=([1-9][0-9]{0,2})")
+# Mirror of poppy/core/skins/manifest.py SKIN_FIELD_NAMES without the route ids
+# (those come from the vendored catalog); a Poppy-side test pins the list.
+KNOWN_SKIN_FIELD_NAMES: frozenset[str] = frozenset(
+    {
+        "schema",
+        "kind",
+        "id",
+        "name",
+        "description",
+        "version",
+        "platform",
+        "layout",
+        "nav",
+        "placement",
+        "labels",
+        "initial",
+        "chat",
+        "side",
+        "workspace",
+        "max_width",
+        "align",
+        "palette",
+        "responsive",
+        "mobile",
+        "presentations",
+    }
+)
+_SKIN_MSG_UNKNOWN_KEY = "unknown key"
+_SKIN_MSG_MISSING_KEY = "required key missing"
+_SKIN_MSG_BAD_VALUE = "value is not allowed here"
+_SKIN_MSG_BAD_TEXT = "text is not valid plain text"
+SkinFinding = tuple[str, str, str]
+_SkinLoc = tuple[str | int, ...]
+
+
+def _safe_skin_path(
+    loc: Sequence[str | int], routes: Sequence[str] | None = None
+) -> str:
+    """Dotted path with every unknown segment replaced by ``<unknown>``."""
+    known_routes = (
+        routes
+        if routes is not None
+        else tuple(
+            cast("dict[str, object]", load_skin_catalog()["presentation_variants"])
+        )
+    )
+    parts: list[str] = []
+    for seg in loc:
+        if isinstance(seg, int) and not isinstance(seg, bool):
+            parts.append(str(seg))
+        elif isinstance(seg, str) and (
+            seg in KNOWN_SKIN_FIELD_NAMES or seg in known_routes
+        ):
+            parts.append(seg)
+        else:
+            parts.append(UNKNOWN_FIELD)
+    return ".".join(parts)
+
+
+def _skin_add(
+    out: list[SkinFinding],
+    routes: Sequence[str],
+    code: str,
+    loc: _SkinLoc,
+    message: str,
+) -> None:
+    out.append((code, _safe_skin_path(loc, routes), message))
+
+
+def _skin_section(
+    value: object,
+    loc: _SkinLoc,
+    required: tuple[str, ...],
+    optional: tuple[str, ...],
+    add: Callable[[str, _SkinLoc, str], None],
+) -> dict[str, object] | None:
+    """Return ``value`` as a dict when it has exactly the allowed key set."""
+    if not isinstance(value, dict):
+        add(SKIN_MANIFEST_INVALID, loc, _SKIN_MSG_BAD_VALUE)
+        return None
+    section = cast("dict[object, object]", value)
+    for key in section:
+        if not isinstance(key, str) or key not in (*required, *optional):
+            add(SKIN_MANIFEST_INVALID, (*loc, "<unknown>"), _SKIN_MSG_UNKNOWN_KEY)
+    for key in required:
+        if key not in section:
+            add(SKIN_MANIFEST_INVALID, (*loc, key), _SKIN_MSG_MISSING_KEY)
+    return {k: v for k, v in section.items() if isinstance(k, str)}
+
+
+def _skin_text_bad(value: object, min_len: int, max_len: int) -> bool:
+    if not isinstance(value, str) or not min_len <= len(value) <= max_len:
+        return True
+    return any(
+        ch in _SKIN_TEXT_FORBIDDEN_CHARS
+        or unicodedata.category(ch) in _SKIN_TEXT_FORBIDDEN_CATEGORIES
+        for ch in value
+    )
+
+
+def _skin_id_bad(value: object) -> bool:
+    return (
+        not isinstance(value, str)
+        or SKIN_NAME_PATTERN.fullmatch(value) is None
+        or value in RESERVED_SKIN_IDS
+        or value.startswith(RESERVED_SKIN_ID_PREFIXES)
+    )
+
+
+def _skin_platform_bad(value: object, level: object) -> bool:
+    if not isinstance(value, str):
+        return True
+    match = _SKIN_PLATFORM.fullmatch(value)
+    return match is None or not isinstance(level, int) or int(match.group(1)) > level
+
+
+def _check_skin_top(
+    doc: dict[str, object],
+    catalog: Mapping[str, object],
+    expected_id: str,
+    expected_version: str,
+    add: Callable[[str, _SkinLoc, str], None],
+) -> None:
+    schema = doc.get("schema")
+    if "schema" in doc and (type(schema) is not int or schema != 1):
+        add(SKIN_MANIFEST_INVALID, ("schema",), _SKIN_MSG_BAD_VALUE)
+    if "kind" in doc and doc["kind"] != "skin":
+        add(SKIN_MANIFEST_INVALID, ("kind",), _SKIN_MSG_BAD_VALUE)
+    if "id" in doc:
+        if _skin_id_bad(doc["id"]):
+            add(SKIN_MANIFEST_INVALID, ("id",), "id is not valid")
+        if isinstance(doc["id"], str) and doc["id"] != expected_id:
+            add(MANIFEST_ID_MISMATCH, ("id",), "skin.yaml id does not match name")
+    if "version" in doc:
+        version = doc["version"]
+        if not isinstance(version, str) or _SKIN_VERSION.fullmatch(version) is None:
+            add(SKIN_MANIFEST_INVALID, ("version",), "version is not valid")
+        if isinstance(version, str) and version != expected_version:
+            add(
+                MANIFEST_VERSION_MISMATCH,
+                ("version",),
+                "skin.yaml version does not match version",
+            )
+    if "platform" in doc and _skin_platform_bad(
+        doc["platform"], catalog.get("platform_level")
+    ):
+        add(SKIN_MANIFEST_INVALID, ("platform",), "platform is not valid")
+    if "name" in doc and _skin_text_bad(doc["name"], 1, SKIN_NAME_MAX):
+        add(SKIN_MANIFEST_INVALID, ("name",), _SKIN_MSG_BAD_TEXT)
+    if "description" in doc and _skin_text_bad(
+        doc["description"], 0, SKIN_DESCRIPTION_MAX
+    ):
+        add(SKIN_MANIFEST_INVALID, ("description",), _SKIN_MSG_BAD_TEXT)
+
+
+def _skin_enum_options(
+    catalog: Mapping[str, object],
+) -> dict[str, dict[str, list[str]]]:
+    initials = cast("dict[str, list[str]]", catalog["initials"])
+    widths = cast("dict[str, object]", catalog["workspace_max_widths"])
+    return {
+        "nav": {
+            "placement": cast("list[str]", catalog["nav_placements"]),
+            "labels": cast("list[str]", catalog["nav_labels"]),
+            "initial": initials["nav"],
+        },
+        "chat": {
+            "placement": cast("list[str]", catalog["chat_placements"]),
+            "side": cast("list[str]", catalog["chat_sides"]),
+            "initial": initials["chat"],
+        },
+        "workspace": {
+            "max_width": list(widths),
+            "align": cast("list[str]", catalog["workspace_aligns"]),
+        },
+    }
+
+
+def _skin_enums(
+    section: dict[str, object],
+    loc: _SkinLoc,
+    options: dict[str, list[str]],
+    add: Callable[[str, _SkinLoc, str], None],
+) -> None:
+    for key, allowed in options.items():
+        if key in section:
+            value = section[key]
+            if not isinstance(value, str) or value not in allowed:
+                add(SKIN_MANIFEST_INVALID, (*loc, key), _SKIN_MSG_BAD_VALUE)
+
+
+_SKIN_LAYOUT_PARTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "nav": (("placement", "labels"), ("initial",)),
+    "chat": (("placement", "initial"), ("side",)),
+    "workspace": (("max_width",), ("align",)),
+}
+_SKIN_MOBILE_PARTS: dict[str, tuple[str, ...]] = {
+    "nav": ("placement", "labels", "initial"),
+    "chat": ("placement", "side", "initial"),
+}
+
+
+def _check_skin_layout(
+    layout: object,
+    options: dict[str, dict[str, list[str]]],
+    add: Callable[[str, _SkinLoc, str], None],
+) -> None:
+    section = _skin_section(
+        layout, ("layout",), ("nav", "chat", "workspace", "palette"), (), add
+    )
+    if section is None:
+        return
+    palette = section.get("palette")
+    if "palette" in section and not isinstance(palette, bool):
+        add(SKIN_MANIFEST_INVALID, ("layout", "palette"), _SKIN_MSG_BAD_VALUE)
+    for part, (required, optional) in _SKIN_LAYOUT_PARTS.items():
+        if part not in section:
+            continue
+        loc: _SkinLoc = ("layout", part)
+        body = _skin_section(section[part], loc, required, optional, add)
+        if body is not None:
+            _skin_enums(body, loc, options[part], add)
+    nav = section.get("nav")
+    nav_body = cast("dict[str, object]", nav) if isinstance(nav, dict) else {}
+    hidden = nav_body.get("placement") == "hidden"
+    if hidden and palette is False:
+        add(
+            SKIN_MANIFEST_INVALID,
+            ("layout", "nav", "placement"),
+            "hidden navigation needs the command palette",
+        )
+
+
+def _check_skin_responsive(
+    responsive: object,
+    palette: object,
+    options: dict[str, dict[str, list[str]]],
+    add: Callable[[str, _SkinLoc, str], None],
+) -> None:
+    section = _skin_section(responsive, ("responsive",), (), ("mobile",), add)
+    if section is None or "mobile" not in section:
+        return
+    mobile = _skin_section(
+        section["mobile"], ("responsive", "mobile"), (), ("nav", "chat"), add
+    )
+    if mobile is None:
+        return
+    for part, keys in _SKIN_MOBILE_PARTS.items():
+        if part not in mobile:
+            continue
+        loc: _SkinLoc = ("responsive", "mobile", part)
+        body = _skin_section(mobile[part], loc, (), keys, add)
+        if body is None:
+            continue
+        _skin_enums(body, loc, options[part], add)
+        if part == "nav" and body.get("placement") == "hidden" and palette is False:
+            add(
+                SKIN_MANIFEST_INVALID,
+                (*loc, "placement"),
+                "hidden navigation needs the command palette",
+            )
+
+
+def _check_skin_presentations(
+    presentations: object,
+    catalog: Mapping[str, object],
+    add: Callable[[str, _SkinLoc, str], None],
+) -> None:
+    if not isinstance(presentations, dict):
+        add(SKIN_MANIFEST_INVALID, ("presentations",), _SKIN_MSG_BAD_VALUE)
+        return
+    variants = cast("dict[str, list[str]]", catalog["presentation_variants"])
+    for key, variant in cast("dict[object, object]", presentations).items():
+        offered = variants.get(key) if isinstance(key, str) else None
+        if offered is None:
+            add(
+                SKIN_MANIFEST_INVALID,
+                ("presentations", key if isinstance(key, str) else UNKNOWN_FIELD),
+                "presentation names a route that has no variants",
+            )
+        elif not isinstance(variant, str) or variant not in offered:
+            add(
+                SKIN_MANIFEST_INVALID,
+                ("presentations", cast("str", key)),
+                "presentation names a variant the route does not offer",
+            )
+
+
+def check_skin_manifest(
+    doc: Mapping[str, object],
+    catalog: Mapping[str, object],
+    *,
+    expected_id: str,
+    expected_version: str,
+) -> list[SkinFinding]:
+    """Apply every SK-C1 error rule the vendored catalog can express.
+
+    Returns ``(code, dotted_path, message)`` triples; messages are fixed and
+    paths never carry a manifest key that is not a known field name.
+    """
+    out: list[SkinFinding] = []
+    routes = tuple(cast("dict[str, object]", catalog["presentation_variants"]))
+
+    def add(code: str, loc: _SkinLoc, message: str) -> None:
+        _skin_add(out, routes, code, loc, message)
+
+    options = _skin_enum_options(catalog)
+    top = _skin_section(
+        dict(doc),
+        (),
+        ("schema", "kind", "id", "name", "version", "platform", "layout"),
+        ("description", "responsive", "presentations"),
+        add,
+    )
+    if top is None:  # pragma: no cover - ``doc`` is always a dict here
+        return out
+    _check_skin_top(top, catalog, expected_id, expected_version, add)
+    if "layout" in top:
+        _check_skin_layout(top["layout"], options, add)
+    layout = top.get("layout")
+    palette = (
+        cast("dict[str, object]", layout).get("palette")
+        if isinstance(layout, dict)
+        else None
+    )
+    if "responsive" in top:
+        _check_skin_responsive(top["responsive"], palette, options, add)
+    if "presentations" in top:
+        _check_skin_presentations(top["presentations"], catalog, add)
+    return out
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="validate_registry.py", description="Validate a registry document."
@@ -2325,6 +3188,11 @@ def _run(argv: list[str] | None) -> int:
             data = handle.read(MAX_REGISTRY_DOCUMENT_BYTES + 1)
     except OSError:
         print(f"{DOC_UNREADABLE}: cannot read the registry file", file=sys.stderr)
+        return 2
+    try:
+        load_skin_catalog()
+    except SkinCatalogError as exc:
+        print(f"{DOC_SKIN_CATALOG}: {exc}", file=sys.stderr)
         return 2
     root = Path(args.root) if args.root is not None else Path(args.registry).parent
     report = validate_document(data, root=root)
