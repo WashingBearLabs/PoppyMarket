@@ -33,9 +33,17 @@ jobs:
             BASE_CI="$(git ls-tree --name-only "$BASE_SHA" -- .github/scripts/validate_registry.py .github/workflows/validate-registry.yml)"
             if [ -z "$BASE_CI" ]; then
               cp .github/scripts/validate_registry.py "$RUNNER_TEMP/validate_registry.py"
+              if [ -f .github/scripts/skin_catalog.json ]; then
+                cp .github/scripts/skin_catalog.json "$RUNNER_TEMP/skin_catalog.json"
+              fi
               echo "::warning title=validator from this PR::The base branch has no validator or workflow yet (first PR), so this PR's own copy ran."
             else
               git show "$BASE_SHA:.github/scripts/validate_registry.py" > "$RUNNER_TEMP/validate_registry.py"
+              # The validator reads skin_catalog.json from its own directory: stage the base's copy
+              # beside it (a base from before skins has none and its validator does not need it).
+              if git cat-file -e "$BASE_SHA:.github/scripts/skin_catalog.json" 2>/dev/null; then
+                git show "$BASE_SHA:.github/scripts/skin_catalog.json" > "$RUNNER_TEMP/skin_catalog.json"
+              fi
             fi
             if [ -n "$(git diff --name-only "$BASE_SHA" HEAD -- .github/)" ]; then
               echo "::warning title=.github changed::This PR changes files under .github/. Review them by hand; this check ran the base branch's validator."
@@ -43,6 +51,9 @@ jobs:
             fi
           else
             cp .github/scripts/validate_registry.py "$RUNNER_TEMP/validate_registry.py"
+            if [ -f .github/scripts/skin_catalog.json ]; then
+              cp .github/scripts/skin_catalog.json "$RUNNER_TEMP/skin_catalog.json"
+            fi
           fi
       - name: Offline checks and change summary
         env:
