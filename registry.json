@@ -49,6 +49,16 @@
       "tags": [
         "theme"
       ]
+    },
+    {
+      "name": "proofbad",
+      "kind": "skin",
+      "description": "CI rejection proof (US-026); never merge.",
+      "version": "0.1.0",
+      "author": "WashingBearLabs",
+      "repo_url": "https://github.com/WashingBearLabs/poppy-skin-proofbad",
+      "ref": "0000000000000000000000000000000000000000",
+      "preview_image": "skins/proofbad/preview.png"
     }
   ]
 }
