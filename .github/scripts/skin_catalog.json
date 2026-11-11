@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "platform_level": 1,
+  "nav_placements": ["left-rail", "top-bar", "bottom-dock", "hidden"],
+  "nav_labels": ["icons", "icons-and-labels"],
+  "chat_placements": ["side-panel", "drawer", "overlay", "bottom-sheet"],
+  "chat_sides": ["left", "right"],
+  "initials": { "nav": ["expanded", "collapsed"], "chat": ["open", "collapsed"] },
+  "workspace_max_widths": { "full": null, "narrow": 840, "medium": 1100, "wide": 1440 },
+  "workspace_aligns": ["start", "center"],
+  "mobile_breakpoint_px": 768,
+  "presentation_variants": {
+    "productivity": ["dashboard", "focus"],
+    "productivity.tasks": ["list", "kanban", "compact"],
+    "productivity.calendar": ["default"],
+    "knowledge": ["default", "card-wall", "two-column"],
+    "knowledge.article": ["default"]
+  }
+}

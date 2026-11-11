@@ -80,15 +80,45 @@ U+2029. Emoji, ZWJ/ZWNJ and soft hyphens are fine.
 The theme's repo must be public: `WashingBearLabs/poppy-theme-<name>`, with tag `v<version>` pointing at
 `ref` and a `theme.yaml` at that commit whose `id` and `version` match the entry.
 
+### Skins (`kind: skin`)
+
+A skin is a declarative layout (`skin.yaml`): where navigation and chat sit, workspace width, phone
+overrides and page layouts. It carries no code. A skin entry may carry only these fields:
+
+| Field | Required | Rule |
+|-------|----------|------|
+| `name` | yes | The skin id: `[a-z][a-z0-9-]{1,31}`. Not a reserved id (`classic`, `default`, `marketplace`, `installed`, `topnav`) and not starting with `wb-` or `poppy-` |
+| `kind` | yes | `"skin"` |
+| `display_name` | no | At most 64 characters |
+| `description` | yes | At most 280 characters |
+| `long_description` | no | At most 4000 characters |
+| `version` | yes | ASCII semver (`1.2.3`, optional `-pre` and `+build`), at most 64 characters |
+| `author` | yes | At most 64 characters |
+| `category` | no | At most 40 characters |
+| `tags` | no | At most 20 tags, each at most 32 characters |
+| `repo_url` | yes | `https://github.com/WashingBearLabs/poppy-skin-<name>` |
+| `ref` | yes | The 40-character lowercase commit of tag `v<version>` in that repo |
+| `preview_image` | yes | `skins/<name>/preview.png` (PNG only); the file must exist in this repo, be a PNG and be at most 2 MiB |
+
+A skin must not set `image`, `port`, `icon`, `hero_image`, `manifest_url`, `capabilities`,
+`use_cases`, or any other field. The public display text rules above apply to every text field.
+
+The skin's repo must be public: `WashingBearLabs/poppy-skin-<name>`, with tag `v<version>` pointing at
+`ref`. CI fetches `skin.yaml` at `ref` (at most 16 KiB) and re-validates it against the vendored
+`.github/scripts/skin_catalog.json` (the platform's known blocks, placements and page layouts); its
+`id` and `version` must match the entry. A green check is structural only: it says the entry and its
+manifest are well formed, not that the layout is good.
+
 ## Adding or changing an entry
 
 PRs on this repo are opened by members of the WashingBearLabs organization only. Outside contributions
 are not accepted; please open an issue instead. A green check on a PR from a fork is structural only
 and is never a reason to merge.
 
-**Themes arrive through Poppy's publish flow.** Poppy pushes the theme to its public
-`poppy-theme-<name>` repo, then opens a PR on this repo (not from a fork) on the branch
-`theme/<name>-v<version>`, as the organization's publish bot account. A later publish of the same
+**Themes and skins arrive through Poppy's publish flow.** Poppy pushes the theme or skin to its
+public `poppy-theme-<name>` or `poppy-skin-<name>` repo, then opens a PR on this repo (not from a
+fork) on the branch `theme/<name>-v<version>` or `skin/<name>-v<version>`, as the organization's
+publish bot account. A later publish of the same
 version updates that PR rather than opening a duplicate. The repository owner reviews, approves and
 merges every PR; nothing merges automatically.
 
@@ -104,9 +134,12 @@ push to `main`. It checks:
 - for theme entries the PR adds or changes (online, PRs only): that the repo exists and is public,
   that tag `v<version>` points at `ref`, and that `theme.yaml` at `ref` carries the entry's `id` and
   `version`.
+- for skin entries the PR adds or changes (online, PRs only): the same repo and tag checks, and that
+  `skin.yaml` at `ref` carries the entry's `id` and `version` and validates against the vendored
+  `skin_catalog.json`.
 
-The full gate for themes is in Poppy, before a PR is ever opened. These checks are structural: they
-cannot judge a theme's content. **A green check is structural only.** PRs from outside the
+The full gate for themes and skins is in Poppy, before a PR is ever opened. These checks are
+structural: they cannot judge a theme's or skin's content. **A green check is structural only.** PRs from outside the
 organization, and any PR that touches `.github/`, need a full manual review of every file.
 
 **Change summary.** The job summary lists "Registry changes in this PR", one `CHANGED` line per added,
@@ -115,7 +148,7 @@ changes, the run also warns "install source changed": review that change by hand
 
 **`UNVERIFIED … could not verify`** means an online check could not complete (a GitHub rate limit, an
 outage, or the job's time budget). The run is not failed, but the entry was not verified: re-run the
-job before merging. **`REPO_NOT_FOUND`** means the theme repo was not found or is not public.
+job before merging. **`REPO_NOT_FOUND`** means the theme or skin repo was not found or is not public.
 
 ### Running the validator locally
 

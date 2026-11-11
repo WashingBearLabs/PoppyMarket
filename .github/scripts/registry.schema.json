@@ -35,7 +35,22 @@
           "$ref": "#/$defs/theme"
         },
         "else": {
-          "$ref": "#/$defs/app"
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "skin"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/skin"
+          },
+          "else": {
+            "$ref": "#/$defs/app"
+          }
         }
       }
     }
@@ -103,6 +118,86 @@
         "preview_image": {
           "type": "string",
           "pattern": "^themes/[a-z0-9][a-z0-9-]{0,62}/preview\\.(png|jpg|jpeg|webp)$"
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "maxLength": 32
+          }
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 40
+        }
+      }
+    },
+    "skin": {
+      "type": "object",
+      "description": "A skin entry (kind: skin). Keys outside this list are refused.",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "description",
+        "version",
+        "author",
+        "repo_url",
+        "ref",
+        "preview_image"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,31}$"
+        },
+        "kind": {
+          "const": "skin"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 280
+        },
+        "long_description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4000
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+          "maxLength": 64
+        },
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "repo_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/WashingBearLabs/poppy-skin-[a-z][a-z0-9-]{1,31}$"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "preview_image": {
+          "type": "string",
+          "pattern": "^skins/[a-z][a-z0-9-]{1,31}/preview\\.png$"
         },
         "tags": {
           "type": "array",
