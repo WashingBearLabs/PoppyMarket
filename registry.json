@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "updated_at": "2026-11-05",
+  "updated_at": "2026-11-11",
   "apps": [
     {
       "name": "acorn",
@@ -48,6 +48,20 @@
       "preview_image": "themes/closeout-test/preview.png",
       "tags": [
         "theme"
+      ]
+    },
+    {
+      "name": "harbor-rail",
+      "kind": "skin",
+      "display_name": "Harbor Rail",
+      "description": "A slim icon rail with a tucked-away chat drawer, giving the workspace every available pixel.",
+      "version": "0.1.0",
+      "author": "WashingBearLabs",
+      "repo_url": "https://github.com/WashingBearLabs/poppy-skin-harbor-rail",
+      "ref": "d74a28b5b9c875d3b93b9ab96751384dbc3aad98",
+      "preview_image": "skins/harbor-rail/preview.png",
+      "tags": [
+        "skin"
       ]
     }
   ]
